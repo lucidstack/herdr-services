@@ -1,0 +1,41 @@
+id = "lucidstack.herdr-services"
+name = "Services"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "See and act on the dev servers and ports running in each workspace"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["bash", "herdr/install.sh"]
+
+[[startup]]
+command = ["bin/herdr-services", "ensure-daemon"]
+
+[[actions]]
+id = "pick"
+title = "Services: open picker"
+description = "List the listening ports of the current workspace"
+contexts = ["workspace", "pane"]
+command = ["bin/herdr-services", "open-picker"]
+
+[[actions]]
+id = "rescan"
+title = "Services: rescan now"
+description = "Re-enumerate listening ports immediately"
+contexts = ["workspace", "pane"]
+command = ["bin/herdr-services", "rescan"]
+
+[[actions]]
+id = "configure"
+title = "Services: install sidebar rows"
+description = "Write the managed [ui.sidebar.spaces] block into herdr's config.toml and reload"
+contexts = ["workspace", "pane"]
+command = ["bin/herdr-services", "configure"]
+
+[[panes]]
+id = "picker"
+title = "services"
+placement = "popup"
+width = "80%"
+height = 16
+command = ["bin/herdr-services", "picker"]

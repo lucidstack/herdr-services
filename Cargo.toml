@@ -1,0 +1,22 @@
+[package]
+name = "herdr-services"
+version = "0.1.0"
+edition = "2021"
+description = "herdr plugin: see and act on the dev servers and ports running in each workspace"
+license = "MIT"
+repository = "https://github.com/lucidstack/herdr-services"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+crossterm = "0.28"
+regex = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+strip = true
