@@ -3,6 +3,8 @@ mod config;
 mod daemon;
 mod doctor;
 mod herdr;
+mod names;
+mod picker;
 mod process;
 mod scan;
 mod sidebar;
@@ -39,7 +41,7 @@ fn main() -> Result<()> {
         Some("open-picker") => open_picker(flag("--verbose")),
         Some("configure") => configure(flag("--remove"), flag("--print"), !flag("--no-reload")),
         Some("doctor") => doctor::run(),
-        Some("picker") => bail!("the picker is not implemented yet (Milestone 2)"),
+        Some("picker") => picker::run(),
         Some("--version") => {
             println!("herdr-services {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -88,8 +90,7 @@ fn rescan() -> Result<()> {
 fn open_picker(verbose: bool) -> Result<()> {
     let (herdr, dirs) = session()?;
     daemon::ensure_daemon(&dirs, verbose)?;
-    let workspace = std::env::var("HERDR_WORKSPACE_ID").ok();
-    herdr.open_plugin_pane(PLUGIN_ID, "picker", workspace.as_deref())
+    herdr.open_plugin_pane(PLUGIN_ID, "picker")
 }
 
 fn configure(remove: bool, print: bool, reload: bool) -> Result<()> {

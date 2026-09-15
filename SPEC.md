@@ -64,8 +64,8 @@ Grilling session, 2026-09-15 (all accepted):
 - **G14** (found on first live link) Unix socket paths are capped at ~104 bytes and the per-session state dir already exceeds that. The control socket lives in `$XDG_RUNTIME_DIR/herdr-services/<key>.sock`, else `<temp>/herdr-services-<uid>/<key>.sock` (dir 0700); files stay in the state dir.
 - **G15** (live test) Docker compose stacks are in scope for v0.1 via `docker ps` + compose labels (§3.2b); the user's worktree ran four containers on 32768–32772 that nothing else could see.
 
-Status: Milestone 1 in progress. This document is the design to build from. It
-is written in British English; keep it that way.
+Status: Milestones 1 and 2 built and verified live (2026-09-16). This document
+is the design to build from. It is written in British English; keep it that way.
 
 ## 1. Why a plugin
 
@@ -90,34 +90,37 @@ is written in British English; keep it that way.
 workspace** (the workspace of the focused pane), newest-listener first:
 
 ```
- services · acme-api (ar/fix-align-piggy)                 3 listening
+ services · acme-api                                        5 listening
  ─────────────────────────────────────────────────────────────────────────
- ● :3000   puma            http://localhost:3000        Rails server   2m
- ● :5173   node (vite)     http://localhost:5173/                       2m
- ○ :6379   redis-server    tcp                                         1h
+ ● puma         :3000   http://localhost:3000                           2m
+ ● vite    :4000   http://localhost:4000                           2m
+ ● postgres     :5433   http://localhost:5433   ⧉ acme-api-postgres-1  1h
  ─────────────────────────────────────────────────────────────────────────
- ⏎ open   y copy url   k kill   K kill -9   l logs   a all workspaces   ? help   esc close
+ ⏎ open   y copy url   x kill   X kill -9   r rescan   a all   / filter   q close
 ```
 
 Keys (inside the popup herdr forwards every key, including Escape, so these are
-plugin-defined; no herdr prefix is involved):
+plugin-defined; no herdr prefix is involved). Letters are commands, so
+filtering is a mode entered with `/` (as in `less`/vim) rather than bare typing:
 
 | Key | Action |
 |---|---|
 | `↑/↓`, `j/k`, `ctrl-n/p` | move |
-| type | filter by port, process, label, url |
-| `⏎` | open URL in the system browser (`open` / `xdg-open` / `cmd /c start`) |
-| `y` | copy URL to clipboard (OSC 52 through the popup terminal) |
-| `x` | kill the owning process (SIGTERM); confirm on first use per session |
-| `X` | SIGKILL |
-| `l` | open a split pane running `lsof -p <pid>`-style info / tail of the pane that started it (v0.2) |
-| `r` | rescan now |
-| `a` | toggle: this workspace ⇄ all workspaces (grouped by workspace) |
-| `esc`, `q` | close |
+| `/` … `⏎` | filter by port, name, label, url, workspace id; `⏎` keeps the filter, `esc` clears it (a second `esc` closes) |
+| `⏎` | open URL in the system browser (`open` / `xdg-open`) |
+| `y` | copy URL: `pbcopy`/`wl-copy`/`xclip`/`xsel` when present, else OSC 52 through the popup terminal |
+| `x` | stop the service (SIGTERM, or `docker stop` for containers); `y/n` confirmation on first use per session (`[picker] confirm_kill`) |
+| `X` | SIGKILL / `docker kill` |
+| `r` | rescan now (via the daemon) |
+| `a` | toggle: this workspace ⇄ all workspaces, grouped by workspace label with unattributed listeners under **other** (open/copy only, never kill) |
+| `esc`, `q`, `ctrl-c` | close |
+| `l` logs | deferred to v0.2 |
 
-Rows show: liveness dot (`●` green = accepted TCP connect, `●` red = listener
-present but connect failed, `○` grey = not probed), port, process name, best
-URL, optional label, age since first seen.
+Rows show: liveness glyph (`●` green = accepted TCP connect, `◌` red = listener
+present but connect refused, `○` grey = not probed), display name (argv-derived:
+`puma` not `ruby`, compose service for containers), port, URL, optional label,
+`⧉ container-name` for containers, age since first seen. The popup polls
+`state.json` every 250 ms so rows update while it is open.
 
 ### 2.2 Sidebar rows (secondary, ambient)
 
@@ -457,7 +460,7 @@ confirm_kill = true
    (macOS `lsof` + Linux `/proc`), event-triggered rescan, attribution by
    pane ancestry + cwd, `state.json`, `svc_N` row tokens, `configure` action
    for the managed sidebar block. Verify with `doctor` inside a real session.
-2. **Picker**: popup TUI, open/copy/kill/rescan, all-workspaces view.
+2. **Picker**: popup TUI, open/copy/kill/rescan, all-workspaces view. ✔ 2026-09-16
 3. **Advertised URLs**: `pane.output_matched` subscription, merge, ranking.
 4. **Manual registration** and persistence; docs; release binaries; marketplace
    topic `herdr-plugin`.

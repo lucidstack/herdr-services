@@ -17,8 +17,9 @@ descends from a pane's shell), then by working directory, then by a workspace
 path on the command line. Nothing outside your workspaces is ever shown in the
 sidebar.
 
-Status: Milestone 1 (detector, sidebar rows, `doctor`). The popup picker
-(open / copy URL / kill) is Milestone 2. See `SPEC.md`.
+Status: Milestones 1–2 (detector, sidebar rows, Docker compose ports, popup
+picker, `doctor`). Next: advertised URLs from pane output, manual entries.
+See `SPEC.md`.
 
 ## Install
 
@@ -27,11 +28,24 @@ herdr plugin install lucidstack/herdr-services
 ```
 
 Then run the **Services: install sidebar rows** action (or
-`herdr plugin action invoke lucidstack.herdr-services.configure`). It writes a
-managed `[ui.sidebar.spaces]` block into herdr's `config.toml` and reloads the
-server. If you already own that table — by hand or via another plugin such as
-herdr-radar — the action refuses and prints the rows to paste instead;
-`bin/herdr-services configure --print` prints them any time.
+`herdr plugin action invoke configure --plugin lucidstack.herdr-services`). It
+writes a managed `[ui.sidebar.spaces]` block into herdr's `config.toml` and
+reloads the server. If you already own that table — by hand or via another
+plugin such as herdr-radar — the action refuses and prints the rows to paste
+instead; `bin/herdr-services configure --print` prints them any time.
+
+Bind the picker to a key:
+
+```toml
+[[keys.command]]
+key = "prefix+s"
+type = "plugin_action"
+command = "lucidstack.herdr-services.pick"
+description = "services"
+```
+
+In the popup: `⏎` open in browser, `y` copy URL, `x` stop (`X` SIGKILL),
+`r` rescan, `a` all workspaces, `/` filter, `q` close.
 
 The detector starts with herdr (`[[startup]]`) and exits when herdr does.
 

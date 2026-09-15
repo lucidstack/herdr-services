@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::attribute::{self, Attribution, PaneRef, Topology, WorkspaceRef};
 use crate::config::Config;
 use crate::herdr::{Herdr, PluginDirs};
+use crate::names;
 use crate::scan::docker::{self, Container};
 use crate::scan::{self, Scanner, Snapshot};
 use crate::sidebar;
@@ -337,7 +338,7 @@ impl Daemon {
                     host_hint: listener.addr.clone(),
                     pid: Some(listener.pid),
                     container: None,
-                    process_name: listener.process_name.clone(),
+                    process_name: names::display_name(&listener.process_name, command),
                     argv_summary: summarise(command),
                     cwd,
                     url: self.config.url_for(listener.port),
@@ -347,7 +348,7 @@ impl Daemon {
                     port: listener.port,
                     host_hint: listener.addr.clone(),
                     pid: Some(listener.pid),
-                    process_name: listener.process_name.clone(),
+                    process_name: names::display_name(&listener.process_name, command),
                     argv_summary: summarise(command),
                     cwd,
                     container: None,

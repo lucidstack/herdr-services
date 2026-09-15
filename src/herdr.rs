@@ -174,13 +174,11 @@ impl Herdr {
         Ok(EventStream { reader })
     }
 
-    pub fn open_plugin_pane(
-        &self,
-        plugin_id: &str,
-        entrypoint: &str,
-        workspace_id: Option<&str>,
-    ) -> Result<()> {
-        let mut args = vec![
+    /// Open a popup/overlay plugin pane. Popups always target the active pane,
+    /// so herdr rejects `--workspace` for them; the picker reads its workspace
+    /// from the environment herdr injects instead.
+    pub fn open_plugin_pane(&self, plugin_id: &str, entrypoint: &str) -> Result<()> {
+        let args = [
             "plugin",
             "pane",
             "open",
@@ -190,9 +188,6 @@ impl Herdr {
             entrypoint,
             "--focus",
         ];
-        if let Some(ws) = workspace_id {
-            args.extend(["--workspace", ws]);
-        }
         self.cli(&args)?;
         Ok(())
     }
