@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::attribute::{self, PaneRef, Topology, WorkspaceRef};
+use crate::attribute::{self, Attribution, PaneRef, Topology, WorkspaceRef};
 use crate::config::Config;
 use crate::herdr::{Herdr, PluginDirs};
 use crate::scan::{self, Scanner, Snapshot};
@@ -274,21 +274,26 @@ impl Daemon {
         let mut unattributed = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for listener in &snapshot.listeners {
-            let command = snapshot.command_of(listener.pid).unwrap_or("");
-            if !self
-                .config
-                .accepts(listener.port, &listener.process_name, command)
-            {
+            if !seen.insert((listener.pid, listener.port)) {
                 continue;
             }
-            if !seen.insert((listener.pid, listener.port)) {
+            let command = snapshot.command_of(listener.pid).unwrap_or("");
+            let hit = attribute::attribute(listener.pid, snapshot, topology);
+            let from_pane = matches!(
+                hit.as_ref().map(|h| &h.attribution),
+                Some(Attribution::Pane { .. })
+            );
+            if !self
+                .config
+                .accepts(listener.port, &listener.process_name, command, from_pane)
+            {
                 continue;
             }
             let cwd = snapshot
                 .cwds
                 .get(&listener.pid)
                 .map(|p| p.to_string_lossy().into_owned());
-            match attribute::attribute(listener.pid, snapshot, topology) {
+            match hit {
                 Some(hit) => observed.push(Observed {
                     workspace_id: hit.workspace_id,
                     port: listener.port,

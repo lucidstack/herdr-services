@@ -159,10 +159,14 @@ pub fn run() -> Result<()> {
     rows.dedup_by_key(|l| (l.port, l.pid));
     for l in rows {
         let command = snapshot.command_of(l.pid).unwrap_or("");
-        if !config.accepts(l.port, &l.process_name, command) {
+        let hit = attribute::attribute(l.pid, &snapshot, &topology);
+        let from_pane = matches!(
+            hit.as_ref().map(|h| &h.attribution),
+            Some(Attribution::Pane { .. })
+        );
+        if !config.accepts(l.port, &l.process_name, command, from_pane) {
             continue;
         }
-        let hit = attribute::attribute(l.pid, &snapshot, &topology);
         let (ws, via) = match &hit {
             Some(h) => {
                 let label = topology.label_of(&h.workspace_id).unwrap_or("");

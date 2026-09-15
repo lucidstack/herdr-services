@@ -28,7 +28,8 @@ pub struct Scan {
     pub ignore_processes: Vec<String>,
     /// If non-empty, only these process names are considered.
     pub allow_processes: Vec<String>,
-    /// Hide listeners on ports >= 49152 (agent tooling, MCP servers, LSPs).
+    /// Hide listeners on ports >= 49152 unless the process descends from a pane
+    /// shell (system daemons and background tooling pick ephemeral ports).
     pub hide_ephemeral: bool,
     /// Regexes matched against the full command line; a match hides the listener.
     #[serde(deserialize_with = "deserialize_regexes")]
@@ -64,10 +65,15 @@ impl Default for Scan {
             command_timeout_ms: 4000,
             min_port: 1024,
             ignore_processes: [
+                // macOS system daemons
                 "rapportd",
                 "sharingd",
                 "ControlCenter",
                 "com.docker.backend",
+                // agent tooling that listens on ephemeral ports from inside panes
+                "omp",
+                "claude",
+                "Google Chrome for Testing",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -147,12 +153,15 @@ impl Config {
         (self.interval().as_millis() as u64) * 6
     }
 
-    /// Whether a detected listener passes the port, name and command-line filters.
-    pub fn accepts(&self, port: u16, process_name: &str, command: &str) -> bool {
+    /// Whether a listener passes the port, name and command-line filters.
+    /// `from_pane` is true when the process descends from a pane shell: such
+    /// listeners are what the user ran in that workspace, so the ephemeral-port
+    /// filter does not apply to them (dev servers on `tcp://0.0.0.0:0` are common).
+    pub fn accepts(&self, port: u16, process_name: &str, command: &str, from_pane: bool) -> bool {
         if port < self.scan.min_port {
             return false;
         }
-        if self.scan.hide_ephemeral && port >= EPHEMERAL_PORT_START {
+        if self.scan.hide_ephemeral && !from_pane && port >= EPHEMERAL_PORT_START {
             return false;
         }
         if self
@@ -203,23 +212,31 @@ mod tests {
     #[test]
     fn filters_apply_in_order() {
         let cfg = Config::default();
-        assert!(cfg.accepts(3000, "node", "node server.js"));
-        assert!(!cfg.accepts(7000, "ControlCenter", ""));
-        assert!(!cfg.accepts(80, "nginx", "nginx"));
+        assert!(cfg.accepts(3000, "node", "node server.js", false));
+        assert!(!cfg.accepts(7000, "ControlCenter", "", false));
+        assert!(!cfg.accepts(80, "nginx", "nginx", true));
         assert!(
-            !cfg.accepts(51234, "omp", "omp worker"),
-            "ephemeral hidden by default"
+            !cfg.accepts(51234, "syncthing", "syncthing", false),
+            "ephemeral hidden for non-pane attributions"
+        );
+        assert!(
+            cfg.accepts(55701, "ruby", "puma 8.0.2 (tcp://0.0.0.0:55701)", true),
+            "a dev server run from a pane keeps its ephemeral port"
+        );
+        assert!(
+            !cfg.accepts(54080, "omp", "omp", true),
+            "agent tooling is denied by name even from a pane"
         );
 
         let cfg =
             Config::parse("[scan]\nhide_ephemeral = false\nignore_commands = [\"mcp-server\"]\n")
                 .unwrap();
-        assert!(cfg.accepts(51234, "node", "node app.js"));
-        assert!(!cfg.accepts(3000, "node", "node mcp-server.js"));
+        assert!(cfg.accepts(51234, "node", "node app.js", false));
+        assert!(!cfg.accepts(3000, "node", "node mcp-server.js", false));
 
         let cfg = Config::parse("[scan]\nallow_processes = [\"puma\"]\n").unwrap();
-        assert!(cfg.accepts(3000, "puma", ""));
-        assert!(!cfg.accepts(3000, "node", ""));
+        assert!(cfg.accepts(3000, "puma", "", false));
+        assert!(!cfg.accepts(3000, "node", "", false));
     }
 
     #[test]

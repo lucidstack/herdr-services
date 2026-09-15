@@ -59,7 +59,7 @@ Grilling session, 2026-09-15 (all accepted):
 - **G9** Kill is daemon-mediated over `daemon.sock`; request carries `(workspace, port, pid, signal)` and the daemon re-checks the triple against its last scan. Picker hides kill when the daemon is unreachable.
 - **G10** Plugin state dir is per plugin, not per session (`src/plugin_paths.rs:21-24`); everything lives under `state/<hash(HERDR_SOCKET_PATH)>/`. `ensure-daemon` removes session dirs whose socket is gone.
 - **G11** Rescan on timer plus debounced (2 s) on `pane.created`/`pane.exited`/`workspace.closed` over a persistent `events.subscribe` connection; that connection dropping is the herdr-gone signal (replaces per-loop `ping`).
-- **G12** Hide listeners on ephemeral ports (≥ 49152, `[scan] hide_ephemeral`) unless advertised/manual; `[scan] ignore_commands` regex list, default empty. Doctor recipe uses a fixed port.
+- **G12** (revised after live test) `[scan] hide_ephemeral` (ports ≥ 49152) applies only to cwd/command-line attributions; a process descending from a pane shell is shown on any port — Rails worktrees here bind `tcp://0.0.0.0:0` and landed on 53512/55701. Pane-attributed agent tooling is denied by name instead: default `ignore_processes` adds `omp`, `claude`, `Google Chrome for Testing`. `[scan] ignore_commands` regex list, default empty.
 - **G13** `[[build]]` only compiles; `config.toml` is touched solely by the explicit `configure` action.
 - **G14** (found on first live link) Unix socket paths are capped at ~104 bytes and the per-session state dir already exceeds that. The control socket lives in `$XDG_RUNTIME_DIR/herdr-services/<key>.sock`, else `<temp>/herdr-services-<uid>/<key>.sock` (dir 0700); files stay in the state dir.
 
@@ -392,9 +392,10 @@ description = "services"
 interval_seconds = 15
 command_timeout_ms = 4000
 min_port = 1024
-ignore_processes = ["rapportd", "sharingd", "ControlCenter", "com.docker.backend"]
+ignore_processes = ["rapportd", "sharingd", "ControlCenter", "com.docker.backend",
+                    "omp", "claude", "Google Chrome for Testing"]
 allow_processes = []          # if non-empty, only these
-hide_ephemeral = true         # ports >= 49152 unless advertised/manual
+hide_ephemeral = true         # ports >= 49152, except processes started from a pane
 ignore_commands = []          # regexes matched against the command line
 
 [urls]
