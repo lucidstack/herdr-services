@@ -62,6 +62,7 @@ Grilling session, 2026-09-15 (all accepted):
 - **G12** (revised after live test) `[scan] hide_ephemeral` (ports ≥ 49152) applies only to cwd/command-line attributions; a process descending from a pane shell is shown on any port — Rails worktrees here bind `tcp://0.0.0.0:0` and landed on 53512/55701. Pane-attributed agent tooling is denied by name instead: default `ignore_processes` adds `omp`, `claude`, `Google Chrome for Testing`. `[scan] ignore_commands` regex list, default empty.
 - **G13** `[[build]]` only compiles; `config.toml` is touched solely by the explicit `configure` action.
 - **G14** (found on first live link) Unix socket paths are capped at ~104 bytes and the per-session state dir already exceeds that. The control socket lives in `$XDG_RUNTIME_DIR/herdr-services/<key>.sock`, else `<temp>/herdr-services-<uid>/<key>.sock` (dir 0700); files stay in the state dir.
+- **G15** (live test) Docker compose stacks are in scope for v0.1 via `docker ps` + compose labels (§3.2b); the user's worktree ran four containers on 32768–32772 that nothing else could see.
 
 Status: Milestone 1 in progress. This document is the design to build from. It
 is written in British English; keep it that way.
@@ -248,6 +249,27 @@ Every 15 s (configurable; 30 s in Orca) enumerate TCP listeners with PID:
 Run the scan in one worker thread; never more than one in flight; per-command
 timeout 4 s; exponential backoff on repeated timeouts (60 s → 5 min).
 
+### 3.2b Container ports (`docker ps`)
+
+Added in Milestone 1 after live testing (G15). Docker Desktop publishes
+container ports through `com.docker.backend`, which has no cwd or ancestry link
+to any workspace, so the listener scan alone cannot attribute them. Instead,
+every scan also runs `docker ps --no-trunc --format '{{json .}}'` (same 4 s
+timeout; a missing or stopped docker yields nothing and is logged once) and
+parses each row's `Ports` (`0.0.0.0:32771->5432/tcp`; IPv4/IPv6 bindings of one
+host port collapse) and compose labels:
+
+- `com.docker.compose.project.working_dir` → attribution by the ordinary
+  deepest-root rule (`Attribution::Container`);
+- `com.docker.compose.service` → row name (`● postgres:32771`), falling back to
+  the container name for plain `docker run` containers.
+
+Container rows carry `container = <name>` and no PID; kill runs `docker stop`
+(`docker kill` for SIGKILL) after checking the name still matches. A host
+process and a container on the same `(workspace, port)` collapse to the host
+process. Published ports are user intent, so the ephemeral-port filter does not
+apply to them; the process-name deny list does (by service name).
+
 ### 3.3 Attribution (which workspace owns a listener)
 
 In order, first hit wins:
@@ -296,9 +318,9 @@ Service {
 
 ### 3.5 What is deliberately out of scope for v0.1
 
-Docker container port mappings (`docker ps` parsing), remote/SSH workspaces
-(herdr `--machine` targets; would need the detector to run on the remote), UDP,
-Unix sockets, Windows.
+Remote/SSH workspaces (herdr `--machine` targets; would need the detector to
+run on the remote), UDP, Unix sockets, Windows. Docker was on this list until
+live testing (G15): a worktree's whole compose stack was invisible.
 
 ## 4. Architecture
 
@@ -398,6 +420,9 @@ allow_processes = []          # if non-empty, only these
 hide_ephemeral = true         # ports >= 49152, except processes started from a pane
 ignore_commands = []          # regexes matched against the command line
 
+[docker]
+enabled = true                # include ports published by running containers
+
 [urls]
 default_scheme = "http"
 https_ports = [443, 8443]
@@ -436,8 +461,7 @@ confirm_kill = true
 3. **Advertised URLs**: `pane.output_matched` subscription, merge, ranking.
 4. **Manual registration** and persistence; docs; release binaries; marketplace
    topic `herdr-plugin`.
-5. Later: Windows, docker port mappings, remote workspaces, `[[daemons]]`
-   upstream proposal.
+5. Later: Windows, remote workspaces, `[[daemons]]` upstream proposal.
 
 ## 7. References
 

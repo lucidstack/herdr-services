@@ -53,4 +53,5 @@ default is listed in `SPEC.md` §4.3.
 
 ## Platforms
 
-macOS (`lsof` + `ps`) and Linux (`/proc`). Windows is not supported in v0.1.
+macOS (`lsof` + `ps`) and Linux (`/proc`); Docker compose stacks on either via
+`docker ps` labels. Windows is not supported in v0.1.

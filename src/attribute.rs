@@ -39,9 +39,13 @@ pub struct Topology {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Attribution {
-    Pane { pane_id: String },
+    Pane {
+        pane_id: String,
+    },
     Cwd,
     Command,
+    /// Compose project `working_dir` label under a workspace root.
+    Container,
     Manual,
 }
 
@@ -134,6 +138,15 @@ pub fn attribute(pid: u32, snapshot: &Snapshot, topology: &Topology) -> Option<A
         }
     }
     None
+}
+
+/// Attribute a container by its compose project directory (deepest workspace root).
+pub fn attribute_container(working_dir: &Path, topology: &Topology) -> Option<Attributed> {
+    let roots = topology.roots();
+    deepest_root_containing(&roots, working_dir).map(|ws| Attributed {
+        workspace_id: ws.to_string(),
+        attribution: Attribution::Container,
+    })
 }
 
 fn by_ancestry(pid: u32, snapshot: &Snapshot, topology: &Topology) -> Option<Attributed> {

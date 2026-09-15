@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::attribute::{self, Attribution, PaneRef, Topology, WorkspaceRef};
 use crate::config::Config;
 use crate::herdr::{Herdr, PluginDirs};
+use crate::scan::docker::{self, Container};
 use crate::scan::{self, Scanner, Snapshot};
 use crate::sidebar;
 use crate::state::{now_ms, Observed, State, SCHEMA};
@@ -37,7 +38,10 @@ pub enum Request {
     Kill {
         workspace: String,
         port: u16,
-        pid: u32,
+        #[serde(default)]
+        pid: Option<u32>,
+        #[serde(default)]
+        container: Option<String>,
         #[serde(default)]
         signal: Signal,
     },
@@ -77,6 +81,8 @@ pub struct Daemon {
     shell_pids: HashMap<String, Option<u32>>,
     consecutive_failures: u32,
     shutting_down: bool,
+    /// Last docker error message, so it is logged once rather than every scan.
+    docker_error: Option<String>,
     verbose: bool,
 }
 
@@ -114,6 +120,7 @@ pub fn run(verbose: bool) -> Result<()> {
         shell_pids: HashMap::new(),
         consecutive_failures: 0,
         shutting_down: false,
+        docker_error: None,
         verbose,
     };
     let result = daemon.main_loop();
@@ -215,8 +222,9 @@ impl Daemon {
     fn scan_and_apply(&mut self) -> Result<()> {
         let timeout = self.config.command_timeout();
         let snapshot = self.scanner.scan(timeout).context("listener scan")?;
+        let containers = self.containers(timeout);
         let topology = self.topology()?;
-        let observed = self.observe(&snapshot, &topology);
+        let observed = self.observe(&snapshot, &containers, &topology);
         self.state.workspace_labels = topology
             .workspaces
             .iter()
@@ -225,6 +233,30 @@ impl Daemon {
         self.state.apply_scan(observed, now_ms());
         self.state.probe_liveness(PROBE_TIMEOUT);
         self.report_sidebar()
+    }
+
+    /// Published container ports; a missing or unreachable docker is not a scan
+    /// failure, it just yields nothing (and is logged once per state change).
+    fn containers(&mut self, timeout: Duration) -> Vec<Container> {
+        if !self.config.docker.enabled || !docker::available() {
+            return Vec::new();
+        }
+        match docker::containers(timeout) {
+            Ok(containers) => {
+                if self.docker_error.take().is_some() {
+                    self.log("docker reachable again");
+                }
+                containers
+            }
+            Err(err) => {
+                let msg = format!("{err:#}");
+                if self.docker_error.as_deref() != Some(msg.as_str()) {
+                    self.log(&format!("docker unavailable: {msg}"));
+                    self.docker_error = Some(msg);
+                }
+                Vec::new()
+            }
+        }
     }
 
     /// Current workspaces and panes with shell PIDs (cached per pane id).
@@ -269,7 +301,12 @@ impl Daemon {
     }
 
     /// Filter and attribute listeners; unattributed ones go to `state.unattributed`.
-    fn observe(&mut self, snapshot: &Snapshot, topology: &Topology) -> Vec<Observed> {
+    fn observe(
+        &mut self,
+        snapshot: &Snapshot,
+        containers: &[Container],
+        topology: &Topology,
+    ) -> Vec<Observed> {
         let mut observed = Vec::new();
         let mut unattributed = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -298,7 +335,8 @@ impl Daemon {
                     workspace_id: hit.workspace_id,
                     port: listener.port,
                     host_hint: listener.addr.clone(),
-                    pid: listener.pid,
+                    pid: Some(listener.pid),
+                    container: None,
                     process_name: listener.process_name.clone(),
                     argv_summary: summarise(command),
                     cwd,
@@ -308,16 +346,65 @@ impl Daemon {
                 None => unattributed.push(crate::state::Unattributed {
                     port: listener.port,
                     host_hint: listener.addr.clone(),
-                    pid: listener.pid,
+                    pid: Some(listener.pid),
                     process_name: listener.process_name.clone(),
                     argv_summary: summarise(command),
                     cwd,
+                    container: None,
                 }),
             }
         }
-        // One row per (workspace, port): prefer the pane-attributed listener.
+        for container in containers {
+            let hit = container
+                .working_dir
+                .as_deref()
+                .and_then(|dir| attribute::attribute_container(dir, topology));
+            let argv = format!("docker {} ({})", container.name, container.image);
+            let cwd = container
+                .working_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            for port in &container.ports {
+                // Published ports are user intent; only the name filters apply.
+                if !self
+                    .config
+                    .accepts(port.host_port, &container.service, &argv, true)
+                {
+                    continue;
+                }
+                match &hit {
+                    Some(hit) => observed.push(Observed {
+                        workspace_id: hit.workspace_id.clone(),
+                        port: port.host_port,
+                        host_hint: port.host_addr.clone(),
+                        pid: None,
+                        container: Some(container.name.clone()),
+                        process_name: container.service.clone(),
+                        argv_summary: argv.clone(),
+                        cwd: cwd.clone(),
+                        url: self.config.url_for(port.host_port),
+                        attribution: hit.attribution.clone(),
+                    }),
+                    None => unattributed.push(crate::state::Unattributed {
+                        port: port.host_port,
+                        host_hint: port.host_addr.clone(),
+                        pid: None,
+                        process_name: container.service.clone(),
+                        argv_summary: argv.clone(),
+                        cwd: cwd.clone(),
+                        container: Some(container.name.clone()),
+                    }),
+                }
+            }
+        }
+        // One row per (workspace, port): host processes win over containers, pane
+        // attribution over the rest (stable sort keeps first-seen order otherwise).
         observed.sort_by(|a, b| {
-            (a.workspace_id.as_str(), a.port).cmp(&(b.workspace_id.as_str(), b.port))
+            (a.workspace_id.as_str(), a.port, a.pid.is_none()).cmp(&(
+                b.workspace_id.as_str(),
+                b.port,
+                b.pid.is_none(),
+            ))
         });
         observed.dedup_by(|b, a| a.workspace_id == b.workspace_id && a.port == b.port);
         unattributed.sort_by_key(|u| (u.port, u.pid));
@@ -367,8 +454,9 @@ impl Daemon {
                 workspace,
                 port,
                 pid,
+                container,
                 signal,
-            } => match self.kill(&workspace, port, pid, signal) {
+            } => match self.kill(&workspace, port, pid, container.as_deref(), signal) {
                 Ok(()) => {
                     self.scan_once();
                     Reply {
@@ -394,16 +482,37 @@ impl Daemon {
         }
     }
 
-    /// Signal `pid` only if it is still the process behind `(workspace, port)`.
-    fn kill(&self, workspace: &str, port: u16, pid: u32, signal: Signal) -> Result<()> {
-        let matches = self
+    /// Stop the thing behind `(workspace, port)`. For a host process the caller's
+    /// `pid` must still match (PID-reuse guard); for a container the caller's
+    /// `container` name must match and `docker stop`/`docker kill` is used.
+    fn kill(
+        &self,
+        workspace: &str,
+        port: u16,
+        pid: Option<u32>,
+        container: Option<&str>,
+        signal: Signal,
+    ) -> Result<()> {
+        let service = self
             .state
             .services_for(workspace)
-            .any(|s| s.port == port && s.pid == Some(pid));
-        if !matches {
-            bail!("no attributed service {workspace}:{port} with pid {pid}; rescan and retry");
+            .find(|s| s.port == port)
+            .ok_or_else(|| anyhow!("no attributed service {workspace}:{port}; rescan and retry"))?;
+        match (&service.container, service.pid) {
+            (Some(name), _) => {
+                if container != Some(name.as_str()) {
+                    bail!("{workspace}:{port} is container {name}, not {container:?}; rescan and retry");
+                }
+                docker_stop(name, signal, self.config.command_timeout())
+            }
+            (None, Some(current)) => {
+                if pid != Some(current) {
+                    bail!("{workspace}:{port} is pid {current}, not {pid:?}; rescan and retry");
+                }
+                send_signal(current, signal)
+            }
+            (None, None) => bail!("{workspace}:{port} has no live process"),
         }
-        send_signal(pid, signal)
     }
 
     fn cleanup(&mut self) {
@@ -435,6 +544,19 @@ fn summarise(command: &str) -> String {
     let mut s: String = command.chars().take(MAX - 1).collect();
     s.push('…');
     s
+}
+
+/// `docker stop` (graceful) or `docker kill` for a container by name.
+fn docker_stop(name: &str, signal: Signal, timeout: Duration) -> Result<()> {
+    let mut command = std::process::Command::new("docker");
+    match signal {
+        Signal::Term => command.args(["stop", name]),
+        Signal::Kill => command.args(["kill", name]),
+    };
+    // `docker stop` waits up to 10 s for the container by default.
+    crate::process::run_checked(command, timeout.max(Duration::from_secs(15)))
+        .with_context(|| format!("stop container {name}"))?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -656,15 +778,29 @@ mod tests {
                 workspace,
                 port,
                 pid,
+                container,
                 signal,
             } => {
                 assert_eq!(
-                    (workspace.as_str(), port, pid, signal),
-                    ("w8", 3000, 42, Signal::Term)
+                    (workspace.as_str(), port, pid, container, signal),
+                    ("w8", 3000, Some(42), None, Signal::Term)
                 );
             }
             other => panic!("unexpected {other:?}"),
         }
+        let r: Request = serde_json::from_str(
+            r#"{"method":"kill","workspace":"wS","port":32771,"container":"x-postgres-1","signal":"kill"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            r,
+            Request::Kill {
+                pid: None,
+                container: Some(_),
+                signal: Signal::Kill,
+                ..
+            }
+        ));
         assert!(matches!(
             serde_json::from_str::<Request>(r#"{"method":"rescan"}"#).unwrap(),
             Request::Rescan

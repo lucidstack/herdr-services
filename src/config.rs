@@ -14,9 +14,24 @@ pub const EPHEMERAL_PORT_START: u16 = 49152;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub scan: Scan,
+    pub docker: Docker,
     pub urls: Urls,
     pub sidebar: Sidebar,
     pub picker: Picker,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Docker {
+    /// Include ports published by running containers (`docker ps`); compose
+    /// projects are attributed by their `working_dir` label.
+    pub enabled: bool,
+}
+
+impl Default for Docker {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -9,6 +9,7 @@ use crate::attribute::{self, Attribution, PaneRef, Topology, WorkspaceRef};
 use crate::config::Config;
 use crate::herdr::{herdr_config_path, Herdr, PluginDirs};
 use crate::scan;
+use crate::scan::docker;
 use crate::sidebar;
 use crate::state::{probe, Liveness};
 
@@ -148,12 +149,58 @@ pub fn run() -> Result<()> {
         format!("{}", topology.roots().len()),
     );
 
+    // Docker
+    let containers = if !config.docker.enabled {
+        check(true, "docker", "disabled in config".into());
+        Vec::new()
+    } else if !docker::available() {
+        check(true, "docker", "not installed".into());
+        Vec::new()
+    } else {
+        match docker::containers(config.command_timeout()) {
+            Ok(cs) => {
+                let ports: usize = cs.iter().map(|c| c.ports.len()).sum();
+                check(
+                    true,
+                    "docker",
+                    format!("{} containers publishing {ports} tcp ports", cs.len()),
+                );
+                cs
+            }
+            Err(err) => {
+                check(true, "docker", format!("unavailable — {err:#}"));
+                Vec::new()
+            }
+        }
+    };
+
     // Table
     println!();
     println!(
-        "{:<7} {:<7} {:<22} {:<10} {:<28} via",
+        "{:<7} {:<12} {:<22} {:<10} {:<28} via",
         "port", "pid", "process", "live", "workspace"
     );
+    let describe = |hit: &Option<attribute::Attributed>| -> (String, String) {
+        match hit {
+            Some(h) => {
+                let label = topology.label_of(&h.workspace_id).unwrap_or("");
+                let via = match &h.attribution {
+                    Attribution::Pane { pane_id } => format!("pane {pane_id}"),
+                    Attribution::Cwd => "cwd".into(),
+                    Attribution::Command => "command".into(),
+                    Attribution::Container => "compose working_dir".into(),
+                    Attribution::Manual => "manual".into(),
+                };
+                (format!("{} ({label})", h.workspace_id), via)
+            }
+            None => ("—".into(), "unattributed".into()),
+        }
+    };
+    let live_text = |addr: &str, port: u16| match probe(addr, port, Duration::from_millis(500)) {
+        Liveness::Up => "up",
+        Liveness::Down => "down",
+        Liveness::Unknown => "?",
+    };
     let mut rows: Vec<_> = snapshot.listeners.iter().collect();
     rows.sort_by_key(|l| (l.port, l.pid));
     rows.dedup_by_key(|l| (l.port, l.pid));
@@ -167,33 +214,34 @@ pub fn run() -> Result<()> {
         if !config.accepts(l.port, &l.process_name, command, from_pane) {
             continue;
         }
-        let (ws, via) = match &hit {
-            Some(h) => {
-                let label = topology.label_of(&h.workspace_id).unwrap_or("");
-                let via = match &h.attribution {
-                    Attribution::Pane { pane_id } => format!("pane {pane_id}"),
-                    Attribution::Cwd => "cwd".into(),
-                    Attribution::Command => "command".into(),
-                    Attribution::Manual => "manual".into(),
-                };
-                (format!("{} ({label})", h.workspace_id), via)
-            }
-            None => ("—".into(), "unattributed".into()),
-        };
-        let live = match probe(&l.addr, l.port, Duration::from_millis(500)) {
-            Liveness::Up => "up",
-            Liveness::Down => "down",
-            Liveness::Unknown => "?",
-        };
+        let (ws, via) = describe(&hit);
         println!(
-            "{:<7} {:<7} {:<22} {:<10} {:<28} {}",
+            "{:<7} {:<12} {:<22} {:<10} {:<28} {}",
             l.port,
             l.pid,
             truncate(&l.process_name, 22),
-            live,
+            live_text(&l.addr, l.port),
             truncate(&ws, 28),
             via
         );
+    }
+    for c in &containers {
+        let hit = c
+            .working_dir
+            .as_deref()
+            .and_then(|d| attribute::attribute_container(d, &topology));
+        let (ws, via) = describe(&hit);
+        for p in &c.ports {
+            println!(
+                "{:<7} {:<12} {:<22} {:<10} {:<28} {}",
+                p.host_port,
+                "container",
+                truncate(&c.service, 22),
+                live_text(&p.host_addr, p.host_port),
+                truncate(&ws, 28),
+                via
+            );
+        }
     }
     println!();
     finish(failures)

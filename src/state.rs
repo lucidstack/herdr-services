@@ -35,6 +35,9 @@ pub struct Service {
     pub port: u16,
     pub host_hint: String,
     pub pid: Option<u32>,
+    /// Docker container name; set for container-published ports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
     pub process_name: String,
     pub argv_summary: String,
     pub cwd: Option<String>,
@@ -51,13 +54,16 @@ pub struct Service {
     pub missed_scans: u8,
 }
 
-/// One listener the scanner saw and attribution accepted.
+/// One listener (process or container) the scanner saw and attribution accepted.
 #[derive(Debug, Clone)]
 pub struct Observed {
     pub workspace_id: String,
     pub port: u16,
     pub host_hint: String,
-    pub pid: u32,
+    /// Host process PID; `None` for containers.
+    pub pid: Option<u32>,
+    /// Docker container name when the listener is a published container port.
+    pub container: Option<String>,
     pub process_name: String,
     pub argv_summary: String,
     pub cwd: Option<String>,
@@ -70,10 +76,12 @@ pub struct Observed {
 pub struct Unattributed {
     pub port: u16,
     pub host_hint: String,
-    pub pid: u32,
+    pub pid: Option<u32>,
     pub process_name: String,
     pub argv_summary: String,
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -112,8 +120,10 @@ impl State {
                 .find(|s| s.workspace_id == o.workspace_id && s.port == o.port)
             {
                 Some(existing) => {
-                    let pid_changed = existing.pid != Some(o.pid);
-                    existing.pid = Some(o.pid);
+                    let identity_changed =
+                        existing.pid != o.pid || existing.container != o.container;
+                    existing.pid = o.pid;
+                    existing.container = o.container;
                     existing.process_name = o.process_name;
                     existing.argv_summary = o.argv_summary;
                     existing.cwd = o.cwd;
@@ -122,7 +132,7 @@ impl State {
                     existing.last_seen_ms = now_ms;
                     existing.missed_scans = 0;
                     // An advertised URL belonged to the old process; fall back to the inferred one.
-                    if pid_changed && existing.source == Source::Advertised {
+                    if identity_changed && existing.source == Source::Advertised {
                         existing.source = Source::Detected;
                         existing.url = o.url;
                     } else if existing.source == Source::Detected {
@@ -133,7 +143,8 @@ impl State {
                     workspace_id: o.workspace_id,
                     port: o.port,
                     host_hint: o.host_hint,
-                    pid: Some(o.pid),
+                    pid: o.pid,
+                    container: o.container,
                     process_name: o.process_name,
                     argv_summary: o.argv_summary,
                     cwd: o.cwd,
@@ -153,6 +164,7 @@ impl State {
         for s in &mut self.services {
             if s.missed_scans > 0 && s.source != Source::Manual {
                 s.pid = None;
+                s.container = None;
             }
         }
         // Newest listener first, then by port for stability.
@@ -251,7 +263,8 @@ mod tests {
             workspace_id: ws.into(),
             port,
             host_hint: "*".into(),
-            pid,
+            pid: Some(pid),
+            container: None,
             process_name: "puma".into(),
             argv_summary: "puma".into(),
             cwd: None,
@@ -293,6 +306,7 @@ mod tests {
             port: 6006,
             host_hint: "*".into(),
             pid: None,
+            container: None,
             process_name: String::new(),
             argv_summary: String::new(),
             cwd: None,

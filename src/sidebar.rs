@@ -15,9 +15,10 @@ pub const BLOCK_END: &str = "# herdr-services:end";
 const TOKEN_VALUE_MAX: usize = 80;
 
 pub fn glyph(service: &Service) -> &'static str {
-    match (service.liveness, service.pid) {
+    let present = service.pid.is_some() || service.container.is_some();
+    match (service.liveness, present) {
         (Liveness::Up, _) => "●",
-        (Liveness::Down, Some(_)) => "◌",
+        (Liveness::Down, true) => "◌",
         _ => "○",
     }
 }
@@ -241,6 +242,7 @@ mod tests {
             port,
             host_hint: "*".into(),
             pid,
+            container: None,
             process_name: name.into(),
             argv_summary: String::new(),
             cwd: None,

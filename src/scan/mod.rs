@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+pub mod docker;
 #[cfg(target_os = "macos")]
 pub mod lsof;
 #[cfg(unix)]
