@@ -52,15 +52,17 @@ pub fn token_key(index: usize) -> String {
     format!("svc_{}", index + 1)
 }
 
-/// Remembers what was last reported per workspace so only changes are sent.
+/// Remembers the last row count per workspace so shrinking lists get explicit
+/// clears. Rows are re-sent on every scan: herdr expires tokens after `ttl_ms`
+/// (6 × interval), so an unchanged list still needs its TTL refreshed.
 #[derive(Debug, Default)]
 pub struct Reporter {
     last: HashMap<String, Vec<String>>,
 }
 
 impl Reporter {
-    /// Report `rows` for `workspace_id`; clears rows above the new count.
-    /// Returns whether a report was sent.
+    /// Report `rows` for `workspace_id`, clearing rows above the new count.
+    /// Returns whether the rows differ from the previous report.
     pub fn report(
         &mut self,
         herdr: &Herdr,
@@ -68,14 +70,9 @@ impl Reporter {
         rows: Vec<String>,
         ttl_ms: u64,
     ) -> Result<bool> {
-        let previous_len = self.last.get(workspace_id).map_or(0, Vec::len);
-        if self
-            .last
-            .get(workspace_id)
-            .is_some_and(|prev| *prev == rows)
-        {
-            return Ok(false);
-        }
+        let previous = self.last.get(workspace_id);
+        let changed = previous != Some(&rows);
+        let previous_len = previous.map_or(0, Vec::len);
         let set: Vec<(String, String)> = rows
             .iter()
             .enumerate()
@@ -86,7 +83,7 @@ impl Reporter {
             .report_metadata(workspace_id, SOURCE, &set, &clear, ttl_ms)
             .with_context(|| format!("report sidebar rows for {workspace_id}"))?;
         self.last.insert(workspace_id.to_string(), rows);
-        Ok(true)
+        Ok(changed)
     }
 
     /// Workspaces previously reported to but absent from `live`: clear their rows.

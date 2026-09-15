@@ -54,7 +54,7 @@ Grilling session, 2026-09-15 (all accepted):
 - **G4** No one-line `services` summary token.
 - **G5** Sidebar rows ascending by port; picker newest-first.
 - **G6** Glyphs `●` up / `◌` down / `○` unprobed; colours via `starts_with` rules.
-- **G7** Explicit `--clear-token` for rows above the current count, one report per changed workspace; TTL is only the dead-daemon net.
+- **G7** Rows are re-reported every scan (the TTL must be refreshed — a change-only report let unchanged rows expire after 6 intervals, found in live testing); rows above the current count are cleared explicitly with `--clear-token`. TTL remains the dead-daemon net.
 - **G8** `configure` reloads the server itself (`herdr server reload-config`); `--no-reload` opt-out.
 - **G9** Kill is daemon-mediated over `daemon.sock`; request carries `(workspace, port, pid, signal)` and the daemon re-checks the triple against its last scan. Picker hides kill when the daemon is unreachable.
 - **G10** Plugin state dir is per plugin, not per session (`src/plugin_paths.rs:21-24`); everything lives under `state/<hash(HERDR_SOCKET_PATH)>/`. `ensure-daemon` removes session dirs whose socket is gone.
