@@ -34,11 +34,13 @@ reloads the server. If you already own that table — by hand or via another
 plugin such as herdr-radar — the action refuses and prints the rows to paste
 instead; `bin/herdr-services configure --print` prints them any time.
 
-Bind the picker to a key:
+Bind the picker to a key (not `prefix+s`: that is herdr's `settings` default
+and herdr silently disables a custom binding that clashes with it — check
+`herdr-client.log` for `config diagnostic` lines):
 
 ```toml
 [[keys.command]]
-key = "prefix+s"
+key = "prefix+§"
 type = "plugin_action"
 command = "lucidstack.herdr-services.pick"
 description = "services"

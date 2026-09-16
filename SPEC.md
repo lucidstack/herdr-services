@@ -86,7 +86,7 @@ is the design to build from. It is written in British English; keep it that way.
 
 ### 2.1 Picker (primary surface)
 
-`prefix+s` (user-bound) opens a popup listing the services of the **current
+A user-bound key (e.g. `prefix+§`) opens a popup listing the services of the **current
 workspace** (the workspace of the focused pane), newest-listener first:
 
 ```
@@ -391,7 +391,7 @@ User keybinding:
 
 ```toml
 [[keys.command]]
-key = "prefix+s"
+key = "prefix+§"              # not prefix+s: herdr's `settings` default wins and disables the binding
 type = "plugin_action"
 command = "lucidstack.herdr-services.pick"
 description = "services"
