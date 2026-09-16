@@ -469,16 +469,136 @@ confirm_kill = true
 3. **Advertised URLs**: `pane.output_matched` subscription, merge, ranking. ✔ 2026-09-16
 4. **Manual registration** and persistence, docs, release binaries and
    marketplace topic. ✔ 2026-09-16
-5. Later: Windows, remote workspaces, `[[daemons]]` upstream proposal.
+5. Later: Windows, remote workspaces, `[[daemons]]` upstream proposal —
+   design sketch in §8, none built yet.
 
-## 7. References
+## 8. Milestone 5 design sketch (2026-09-16, unbuilt)
+
+Three unrelated workstreams, deliberately left as "Later" with no design in
+§6. This section sketches each so a future session can pick one up without
+re-deriving it, and is explicit about what is still genuinely unknown.
+
+### 8.1 Windows support
+
+- **Listener scan**: `netstat -ano -p tcp` (LISTENING rows only), parsed the
+  same way `scan/ps.rs`/`scan/procfs.rs` already parse fixed-width/columnar
+  OS output — new `scan/netstat.rs` implementing the `Scanner` trait
+  (`scan/mod.rs`).
+- **Process metadata**: no `/proc` or `lsof`; command line and name need
+  `Get-CimInstance Win32_Process | Select ProcessId,CommandLine` via
+  `powershell -NoProfile -Command`, batched by PID list like the existing
+  `lsof -a -p a,b,c -d cwd -Fn` batching (G-decision in §0) — one call, not
+  one per PID.
+- **cwd is the hard part.** Neither `netstat` nor `Win32_Process` exposes a
+  process's working directory, and there is no cheap Windows equivalent of
+  macOS `lsof -d cwd` or Linux `/proc/<pid>/cwd` without a debug-privilege API
+  (`NtQueryInformationProcess` + reading the PEB out of the target process,
+  or `WMI Win32_Process.Handle` + a debugger-level query). Attribution
+  (§3.3) would likely have to ship without rule 2 (cwd) on this platform —
+  pane ancestry (rule 1) and command-line path boundary (rule 3) still work
+  without it, so this degrades gracefully rather than blocking the port.
+- **Kill**: `taskkill /PID <pid>` (graceful) / `taskkill /PID <pid> /F`
+  (`Signal::Kill`) replaces `libc::kill` in `daemon.rs::send_signal`.
+- **Daemon detach**: no `setsid`; the Windows equivalent is
+  `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` via
+  `CommandExt::creation_flags` (`std::os::windows::process`), replacing
+  `daemon.rs::detach`'s `#[cfg(unix)]` arm.
+- **Control socket and event stream are the biggest chunk, not the scanner.**
+  `herdr.rs::EventStream` and every control-socket function in `daemon.rs`
+  are hard-coded to `std::os::unix::net::UnixStream`. Windows 10+ does support
+  `AF_UNIX`, but Rust's std has no `std::os::windows::net::UnixStream`; this
+  needs either the `uds_windows` crate or switching the control/event
+  transport to named pipes on that platform — a real abstraction, not a
+  `#[cfg]` swap, since `Herdr::subscribe`/`subscribe_pane_output` and
+  `spawn_control_listener`/`control`/`live_daemon_pid` all take a concrete
+  Unix socket type today.
+- **Packaging**: `platforms` in `herdr-plugin.toml` needs `"windows"`;
+  `herdr/install.sh` is bash and won't run under a stock Windows install —
+  needs a `.ps1` build hook or a build-hook command herdr can run cross
+  platform (check what other plugins do here before inventing something).
+- **Rough scope**: comparable to all of Milestone 1's scanner work, plus a
+  socket-transport abstraction touching every `#[cfg(unix)]` function in
+  `daemon.rs`/`herdr.rs` — the transport swap is the larger of the two.
+
+### 8.2 Remote workspaces
+
+- herdr's own docs are explicit that "a plugin is ordinary code that runs on
+  your machine" (`plugins.mdx`) and that in `--remote`/multi-machine mode the
+  remote host's own herdr server owns the panes and process tree while the
+  local client only draws the UI over the wire (`persistence-remote.mdx`,
+  `connecting-machines.mdx`). `--machine <profile>` is a separate,
+  CLI-only proxying prefix for scripting specific commands against a
+  different saved SSH-connected herdr server; per `cli-reference.mdx` it
+  forwards only an explicit method allowlist, not arbitrary shell execution.
+- **Working theory, not yet verified against a real two-machine setup**:
+  herdr-services already works unmodified on a remote-hosted workspace,
+  *as long as it is separately linked on the herdr instance actually running
+  on that host* (SSH in, `herdr plugin link` there too) — because the daemon
+  only ever needs the `HERDR_SOCKET_PATH`/`HERDR_BIN_PATH` of whichever herdr
+  process launched it, and that process is the one with local `lsof`/`/proc`
+  visibility into the panes it owns. Under this theory "remote workspace
+  support" is an installation instruction ("link the plugin on every machine
+  you use it from"), not new code.
+- **What would actually require code**: only if the ask turns out to be "one
+  daemon on the control machine sees ports on a *different* machine's
+  workspaces without a second install there" — a materially different
+  feature, needing either the daemon opening its own SSH connection per
+  saved `--machine` profile to run `lsof`/`/proc` reads remotely (duplicating
+  credentials herdr already has saved), or herdr itself exposing scan/read
+  primitives over the existing `--machine`-forwarded API surface (a herdr
+  core change, not a plugin one).
+- **Before building anything**: verify the "just link it twice" theory
+  against a real two-machine herdr setup (`connecting-machines.mdx`'s
+  `workbox`-style profile). Only design further if that is confirmed
+  insufficient for what users actually ask for — do not build speculative
+  cross-machine scanning against a hypothetical requirement.
+
+### 8.3 `[[daemons]]` upstream proposal
+
+- **Problem**: `ensure-daemon` from `[[startup]]` (decided at Milestone 1,
+  §4) works around herdr's plugin manifest having no first-class supervised
+  process primitive — herdr's own docs call a startup hook "one-shot
+  initialization" (`plugins.mdx`), not a supervised daemon: herdr never
+  restarts it, doesn't capture its stdout/stderr the way it does other
+  plugin invocations, and every action (`pick`, `rescan`, `configure`,
+  `add`) has to defensively re-check and potentially respawn it
+  (`daemon::ensure_daemon`, `daemon::live_daemon_pid`) rather than trusting
+  herdr to keep exactly one instance alive.
+- **`docs/research/herdr-core-services-prd.md` is not prior art for this.**
+  It is a shelved *alternative, core-native* design for the whole services
+  feature (an explicit-registration `herdr service add/list/remove` CLI
+  plus a core sidebar chip, competing with this entire plugin, not with
+  `ensure-daemon`) — it does not touch supervised-process manifest entries
+  at all. Do not cite it as groundwork for `[[daemons]]`; re-derive from
+  scratch.
+- **Sketch of the ask** (fresh, unvalidated against herdr's actual
+  extension-point conventions): a `[[daemons]]` manifest table alongside
+  `[[startup]]`/`[[actions]]` — `id`, `command`, `restart =
+  "no"|"on-failure"|"always"`, optional `ready = { log = "regex", port = N,
+  timeout_secs = N }`. This harness's own `hub start` readiness/restart
+  semantics are a reasonable reference shape to study, not to copy
+  blindly — herdr's actual process/session model may impose different
+  constraints (e.g. how it already tracks pane process lifecycles in
+  `src/pane.rs`, per the PRD's §1 findings above). herdr would supervise the
+  process for the plugin's install lifetime, surface its output via
+  `herdr plugin log`, and terminate it on `plugin unlink`/session end,
+  replacing this plugin's pidfile/control-socket self-healing dance.
+- **Process**: this is cross-repo work against `lucidstack/herdr`, not this
+  repo — a design issue/doc there first, prototyped there, and only once a
+  `[[daemons]]` primitive actually exists upstream does this plugin drop
+  `ensure_daemon`/`gc_sessions`/the pidfile dance in favour of it. Do not
+  attempt the herdr-side change from within a herdr-services session.
+
+## 9. References
 
 - herdr plugin docs: `docs/next/website/src/content/docs/plugins.mdx`,
-  `socket-api.mdx`, `cli-reference.mdx` in the herdr repo.
+  `socket-api.mdx`, `cli-reference.mdx`, `persistence-remote.mdx`,
+  `connecting-machines.mdx` in the herdr repo.
 - Reference plugin with popup picker + detached daemon: `ChmaraX/herdr-nvim`
   (`herdr-plugin.toml`, `src/picker.rs`, `src/daemon.rs`, `herdr/install.sh`).
 - Orca port detection: `stablyai/orca` `src/main/ports/` —
   `local-workspace-platform-port-scanner.ts`, `local-workspace-port-attribution.ts`,
   `advertised-url-watcher.ts`, `advertised-url-parsing.ts`.
-- Shelved core prototype: `lucidstack/herdr@feature/services`;
-  design notes in `docs/research/herdr-core-services-prd.md`.
+- Shelved core prototype (services registry, not daemon supervision):
+  `lucidstack/herdr@feature/services`; design notes in
+  `docs/research/herdr-core-services-prd.md` (see §8.3).
