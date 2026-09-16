@@ -1,2 +1,4 @@
 /target/
 /bin/
+# Local agent session brief; not part of the published plugin.
+/PROMPT.md
