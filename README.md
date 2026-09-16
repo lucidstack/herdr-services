@@ -17,9 +17,9 @@ descends from a pane's shell), then by working directory, then by a workspace
 path on the command line. Nothing outside your workspaces is ever shown in the
 sidebar.
 
-Status: Milestones 1–2 (detector, sidebar rows, Docker compose ports, popup
-picker, `doctor`). Next: advertised URLs from pane output, manual entries.
-See `SPEC.md`.
+Status: Milestones 1–4 (detector, sidebar rows, Docker compose ports, popup
+picker, `doctor`, advertised URLs from pane output, manual entries). Next:
+Windows and remote-workspace support. See `SPEC.md`.
 
 ## Install
 
@@ -47,7 +47,20 @@ description = "services"
 ```
 
 In the popup: `⏎` open in browser, `y` copy URL, `x` stop (`X` SIGKILL),
-`r` rescan, `a` all workspaces, `/` filter, `q` close.
+`r` rescan, `a` all workspaces, `/` filter, `q` close. A row's URL is either
+inferred (`http://localhost:PORT`), advertised — printed by the process
+itself and confirmed once a listener actually appears on that port — or
+manual, set with `add` below.
+
+For servers the detector cannot see (remote tunnels, a URL you simply want
+pinned):
+
+```sh
+bin/herdr-services add "Rails server" :3000        # attributes to $HERDR_WORKSPACE_ID
+bin/herdr-services add "Storybook" http://localhost:6006 --workspace w3
+bin/herdr-services remove --label "Storybook"
+bin/herdr-services list [--workspace <id>] [--json]
+```
 
 The detector starts with herdr (`[[startup]]`) and exits when herdr does.
 
