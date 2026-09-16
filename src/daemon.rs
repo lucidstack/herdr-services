@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::advertise::{self, Advertisements};
 use crate::attribute::{self, Attribution, PaneRef, Topology, WorkspaceRef};
 use crate::config::Config;
 use crate::herdr::{Herdr, PluginDirs};
@@ -69,6 +71,10 @@ pub struct Reply {
 enum Wake {
     Control(Request, Sender<Reply>),
     Event,
+    Advertised {
+        pane_id: String,
+        matched_line: String,
+    },
     HerdrGone,
 }
 
@@ -85,6 +91,18 @@ pub struct Daemon {
     /// Last docker error message, so it is logged once rather than every scan.
     docker_error: Option<String>,
     verbose: bool,
+    /// Advertised URLs from pane output (SPEC §3.1), keyed by workspace/port.
+    advertisements: Advertisements,
+    /// Pane id → workspace id, refreshed every scan; resolves `Wake::Advertised`.
+    pane_workspaces: HashMap<String, String>,
+    /// Pane ids the output watcher is currently subscribed to (sorted).
+    watched_panes: Vec<String>,
+    /// Socket of the running output watcher, kept only to force it closed
+    /// when the pane set changes.
+    output_watcher: Option<UnixStream>,
+    /// Set once `main_loop` creates the wake channel; lets scan code spawn
+    /// the output watcher with a sender back into the loop.
+    event_tx: Option<Sender<Wake>>,
 }
 
 pub fn run(verbose: bool) -> Result<()> {
@@ -123,6 +141,11 @@ pub fn run(verbose: bool) -> Result<()> {
         shutting_down: false,
         docker_error: None,
         verbose,
+        advertisements: Advertisements::default(),
+        pane_workspaces: HashMap::new(),
+        watched_panes: Vec::new(),
+        output_watcher: None,
+        event_tx: None,
     };
     let result = daemon.main_loop();
     daemon.cleanup();
@@ -139,7 +162,8 @@ impl Daemon {
     fn main_loop(&mut self) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         spawn_control_listener(&self.dirs.control_socket(), tx.clone())?;
-        spawn_event_watcher(self.herdr.clone(), tx);
+        spawn_event_watcher(self.herdr.clone(), tx.clone());
+        self.event_tx = Some(tx);
         self.state.scan_backend = self.scanner.name().to_string();
 
         let mut next_scan = Instant::now();
@@ -168,6 +192,14 @@ impl Daemon {
                     continue;
                 }
                 Ok(Wake::Event) => {
+                    pending_event.get_or_insert(Instant::now() + EVENT_DEBOUNCE);
+                    continue;
+                }
+                Ok(Wake::Advertised {
+                    pane_id,
+                    matched_line,
+                }) => {
+                    self.apply_advertisement(&pane_id, &matched_line);
                     pending_event.get_or_insert(Instant::now() + EVENT_DEBOUNCE);
                     continue;
                 }
@@ -225,6 +257,13 @@ impl Daemon {
         let snapshot = self.scanner.scan(timeout).context("listener scan")?;
         let containers = self.containers(timeout);
         let topology = self.topology()?;
+        self.pane_workspaces = topology
+            .panes
+            .iter()
+            .map(|p| (p.pane_id.clone(), p.workspace_id.clone()))
+            .collect();
+        self.advertisements.retain_panes(&self.pane_workspaces);
+        self.sync_output_watcher(&topology);
         let observed = self.observe(&snapshot, &containers, &topology);
         self.state.workspace_labels = topology
             .workspaces
@@ -332,18 +371,32 @@ impl Daemon {
                 .get(&listener.pid)
                 .map(|p| p.to_string_lossy().into_owned());
             match hit {
-                Some(hit) => observed.push(Observed {
-                    workspace_id: hit.workspace_id,
-                    port: listener.port,
-                    host_hint: listener.addr.clone(),
-                    pid: Some(listener.pid),
-                    container: None,
-                    process_name: names::display_name(&listener.process_name, command),
-                    argv_summary: summarise(command),
-                    cwd,
-                    url: self.config.url_for(listener.port),
-                    attribution: hit.attribution,
-                }),
+                Some(hit) => {
+                    let previous_pid = self
+                        .state
+                        .services_for(&hit.workspace_id)
+                        .find(|s| s.port == listener.port)
+                        .and_then(|s| s.pid);
+                    if previous_pid.is_some() && previous_pid != Some(listener.pid) {
+                        self.advertisements.forget(&hit.workspace_id, listener.port);
+                    }
+                    let advertised_url = self.advertisements.get(&hit.workspace_id, listener.port);
+                    let advertised = advertised_url.is_some();
+                    let url = advertised_url.unwrap_or_else(|| self.config.url_for(listener.port));
+                    observed.push(Observed {
+                        workspace_id: hit.workspace_id,
+                        port: listener.port,
+                        host_hint: listener.addr.clone(),
+                        pid: Some(listener.pid),
+                        container: None,
+                        process_name: names::display_name(&listener.process_name, command),
+                        argv_summary: summarise(command),
+                        cwd,
+                        url,
+                        advertised,
+                        attribution: hit.attribution,
+                    })
+                }
                 None => unattributed.push(crate::state::Unattributed {
                     port: listener.port,
                     host_hint: listener.addr.clone(),
@@ -384,6 +437,7 @@ impl Daemon {
                         argv_summary: argv.clone(),
                         cwd: cwd.clone(),
                         url: self.config.url_for(port.host_port),
+                        advertised: false,
                         attribution: hit.attribution.clone(),
                     }),
                     None => unattributed.push(crate::state::Unattributed {
@@ -434,6 +488,42 @@ impl Daemon {
         }
         let live: Vec<&str> = ids.iter().map(String::as_str).collect();
         self.reporter.clear_missing(&self.herdr, &live)
+    }
+
+    /// Resubscribe `pane.output_matched` when the pane set has changed since
+    /// the last scan (new/closed panes): shut down the old subscription and
+    /// open a fresh one covering exactly the panes seen this scan.
+    fn sync_output_watcher(&mut self, topology: &Topology) {
+        let mut pane_ids: Vec<String> = topology.panes.iter().map(|p| p.pane_id.clone()).collect();
+        pane_ids.sort();
+        if pane_ids == self.watched_panes {
+            return;
+        }
+        if let Some(old) = self.output_watcher.take() {
+            let _ = old.shutdown(std::net::Shutdown::Both);
+        }
+        self.watched_panes = pane_ids.clone();
+        let Some(tx) = self.event_tx.clone() else {
+            return;
+        };
+        self.output_watcher = spawn_output_watcher(&self.herdr, &pane_ids, tx);
+    }
+
+    /// A `pane.output_matched` push arrived between scans: resolve the pane's
+    /// workspace from the cache the last scan built and record the URL.
+    fn apply_advertisement(&mut self, pane_id: &str, matched_line: &str) {
+        let Some(workspace_id) = self.pane_workspaces.get(pane_id).cloned() else {
+            return;
+        };
+        let Some((port, url)) = advertise::parse_url(matched_line) else {
+            return;
+        };
+        if self
+            .advertisements
+            .record(workspace_id, port, url, pane_id.to_string())
+        {
+            self.log(&format!("advertised url for {pane_id}:{port}"));
+        }
     }
 
     fn handle(&mut self, request: Request) -> Reply {
@@ -658,6 +748,42 @@ fn spawn_event_watcher(herdr: Herdr, tx: Sender<Wake>) {
             }
         })
         .ok();
+}
+
+/// Subscribe to `pane.output_matched` for `pane_ids`; each match becomes a
+/// `Wake::Advertised`. Returns a clone of the underlying socket so the caller
+/// can force this subscription closed (and the thread ended) once the pane
+/// set changes and a fresh one is needed.
+fn spawn_output_watcher(
+    herdr: &Herdr,
+    pane_ids: &[String],
+    tx: Sender<Wake>,
+) -> Option<std::os::unix::net::UnixStream> {
+    if pane_ids.is_empty() {
+        return None;
+    }
+    let mut stream = herdr.subscribe_pane_output(pane_ids).ok()?;
+    let handle = stream.try_clone_socket().ok()?;
+    thread::Builder::new()
+        .name("output-watcher".into())
+        .spawn(move || loop {
+            match stream.next_output_matched() {
+                Ok(Some((pane_id, matched_line))) => {
+                    if tx
+                        .send(Wake::Advertised {
+                            pane_id,
+                            matched_line,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(None) | Err(_) => return,
+            }
+        })
+        .ok()?;
+    Some(handle)
 }
 
 /// Send one request to a running daemon and return its reply.

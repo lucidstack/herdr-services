@@ -143,14 +143,39 @@ impl Herdr {
     /// reader yields one raw JSON line per event; EOF means herdr went away.
     #[cfg(unix)]
     pub fn subscribe(&self, types: &[&str]) -> Result<EventStream> {
-        use std::os::unix::net::UnixStream;
-        let mut stream = UnixStream::connect(&self.socket)
-            .with_context(|| format!("connect {}", self.socket.display()))?;
-        stream.set_write_timeout(Some(self.timeout))?;
         let subscriptions: Vec<Value> = types
             .iter()
             .map(|t| serde_json::json!({ "type": t }))
             .collect();
+        self.subscribe_with(subscriptions)
+    }
+
+    /// Subscribe to `pane.output_matched` for each pane, matching the
+    /// advertised-URL regex (SPEC §3.1). One subscription per pane: herdr has
+    /// no wildcard `pane_id`.
+    #[cfg(unix)]
+    pub fn subscribe_pane_output(&self, pane_ids: &[String]) -> Result<EventStream> {
+        let subscriptions: Vec<Value> = pane_ids
+            .iter()
+            .map(|pane_id| {
+                serde_json::json!({
+                    "type": "pane.output_matched",
+                    "pane_id": pane_id,
+                    "source": "recent",
+                    "match": { "type": "regex", "value": crate::advertise::URL_PATTERN },
+                    "strip_ansi": true,
+                })
+            })
+            .collect();
+        self.subscribe_with(subscriptions)
+    }
+
+    #[cfg(unix)]
+    fn subscribe_with(&self, subscriptions: Vec<Value>) -> Result<EventStream> {
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(&self.socket)
+            .with_context(|| format!("connect {}", self.socket.display()))?;
+        stream.set_write_timeout(Some(self.timeout))?;
         let request = serde_json::json!({
             "id": "herdr-services-events",
             "method": "events.subscribe",
@@ -269,6 +294,42 @@ pub struct EventStream {
 impl EventStream {
     /// Next event's name (e.g. `pane_created`), or `None` at EOF (herdr closed the socket).
     pub fn next_event(&mut self) -> Result<Option<String>> {
+        Ok(self
+            .next_frame()?
+            .and_then(|v| v.get("event").and_then(Value::as_str).map(str::to_string)))
+    }
+
+    /// Next `pane.output_matched` push as `(pane_id, matched_line)`, or `None`
+    /// at EOF. Only meaningful on a stream opened with
+    /// [`Herdr::subscribe_pane_output`].
+    pub fn next_output_matched(&mut self) -> Result<Option<(String, String)>> {
+        let Some(value) = self.next_frame()? else {
+            return Ok(None);
+        };
+        let pane_id = value
+            .pointer("/data/pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let matched_line = value
+            .pointer("/data/matched_line")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Ok(Some((pane_id, matched_line)))
+    }
+
+    /// A clone of the underlying socket, so a caller can force this stream to
+    /// end (`shutdown`) without waiting for herdr to close its side.
+    pub fn try_clone_socket(&self) -> Result<std::os::unix::net::UnixStream> {
+        self.reader
+            .get_ref()
+            .try_clone()
+            .context("clone event socket")
+    }
+
+    /// Read raw frames until one carries an `event` field, or EOF.
+    fn next_frame(&mut self) -> Result<Option<Value>> {
         let mut line = String::new();
         loop {
             line.clear();
@@ -276,8 +337,10 @@ impl EventStream {
             if n == 0 {
                 return Ok(None);
             }
-            if let Some(name) = event_name(&line) {
-                return Ok(Some(name));
+            if event_name(&line).is_some() {
+                if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                    return Ok(Some(value));
+                }
             }
         }
     }

@@ -63,8 +63,9 @@ Grilling session, 2026-09-15 (all accepted):
 - **G13** `[[build]]` only compiles; `config.toml` is touched solely by the explicit `configure` action.
 - **G14** (found on first live link) Unix socket paths are capped at ~104 bytes and the per-session state dir already exceeds that. The control socket lives in `$XDG_RUNTIME_DIR/herdr-services/<key>.sock`, else `<temp>/herdr-services-<uid>/<key>.sock` (dir 0700); files stay in the state dir.
 - **G15** (live test) Docker compose stacks are in scope for v0.1 via `docker ps` + compose labels (§3.2b); the user's worktree ran four containers on 32768–32772 that nothing else could see.
+- **G16** (Milestone 3, live test) `events.subscribe` streams take over their connection (`stream_subscriptions` in herdr's server), so the per-pane `pane.output_matched` fan-out is a second, independent event connection, resubscribed with the current pane list whenever it changes (piggybacked on the existing scan cycle, not a new topology-event path). Advertised URLs live in an in-memory `(workspace, port) → url` registry, ranked by scheme + hostname (https/custom beats http/loopback); a service adopts one only once the listener scan confirms a process on that port, and the registry entry is dropped — not just the service's `Source` — the instant that port's PID changes, so a stale URL from before a restart can never resurface. The regex's optional path capture excludes `)`, `]`, `>`, `,`: log lines commonly wrap the URL (`Serving HTTP on 127.0.0.1 port 52725 (http://127.0.0.1:52725/) ...`) and a greedy path swallowed the closing paren in the first live test.
 
-Status: Milestones 1 and 2 built and verified live (2026-09-16). This document
+Status: Milestones 1–3 built and verified live (2026-09-16). This document
 is the design to build from. It is written in British English; keep it that way.
 
 ## 1. Why a plugin
@@ -461,7 +462,7 @@ confirm_kill = true
    pane ancestry + cwd, `state.json`, `svc_N` row tokens, `configure` action
    for the managed sidebar block. Verify with `doctor` inside a real session.
 2. **Picker**: popup TUI, open/copy/kill/rescan, all-workspaces view. ✔ 2026-09-16
-3. **Advertised URLs**: `pane.output_matched` subscription, merge, ranking.
+3. **Advertised URLs**: `pane.output_matched` subscription, merge, ranking. ✔ 2026-09-16
 4. **Manual registration** and persistence; docs; release binaries; marketplace
    topic `herdr-plugin`.
 5. Later: Windows, remote workspaces, `[[daemons]]` upstream proposal.

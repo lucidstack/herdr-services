@@ -1,3 +1,4 @@
+mod advertise;
 mod attribute;
 mod config;
 mod daemon;

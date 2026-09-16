@@ -68,6 +68,7 @@ pub struct Observed {
     pub argv_summary: String,
     pub cwd: Option<String>,
     pub url: String,
+    pub advertised: bool,
     pub attribution: Attribution,
 }
 
@@ -131,8 +132,11 @@ impl State {
                     existing.attribution = o.attribution;
                     existing.last_seen_ms = now_ms;
                     existing.missed_scans = 0;
-                    // An advertised URL belonged to the old process; fall back to the inferred one.
-                    if identity_changed && existing.source == Source::Advertised {
+                    if o.advertised {
+                        existing.source = Source::Advertised;
+                        existing.url = o.url;
+                    } else if identity_changed && existing.source == Source::Advertised {
+                        // An advertised URL belonged to the old process; fall back to the inferred one.
                         existing.source = Source::Detected;
                         existing.url = o.url;
                     } else if existing.source == Source::Detected {
@@ -150,7 +154,11 @@ impl State {
                     cwd: o.cwd,
                     url: o.url,
                     label: None,
-                    source: Source::Detected,
+                    source: if o.advertised {
+                        Source::Advertised
+                    } else {
+                        Source::Detected
+                    },
                     attribution: o.attribution,
                     first_seen_ms: now_ms,
                     last_seen_ms: now_ms,
@@ -269,8 +277,28 @@ mod tests {
             argv_summary: "puma".into(),
             cwd: None,
             url: format!("http://localhost:{port}"),
+            advertised: false,
             attribution: Attribution::Cwd,
         }
+    }
+
+    #[test]
+    fn observed_advertised_url_is_adopted_and_persists_until_pid_changes() {
+        let mut state = State::default();
+        let mut o = observed("w1", 3000, 10);
+        o.advertised = true;
+        o.url = "https://app.test:3000/".into();
+        state.apply_scan(vec![o], 1);
+        assert_eq!(state.services[0].source, Source::Advertised);
+        assert_eq!(state.services[0].url, "https://app.test:3000/");
+        // Same pid, no fresh advertisement this scan: the advertised url survives.
+        state.apply_scan(vec![observed("w1", 3000, 10)], 2);
+        assert_eq!(state.services[0].source, Source::Advertised);
+        assert_eq!(state.services[0].url, "https://app.test:3000/");
+        // New pid: the advertised url is invalidated in favour of the inferred one.
+        state.apply_scan(vec![observed("w1", 3000, 99)], 3);
+        assert_eq!(state.services[0].source, Source::Detected);
+        assert_eq!(state.services[0].url, "http://localhost:3000");
     }
 
     #[test]
