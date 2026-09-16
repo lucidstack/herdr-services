@@ -65,6 +65,7 @@ Grilling session, 2026-09-15 (all accepted):
 - **G15** (live test) Docker compose stacks are in scope for v0.1 via `docker ps` + compose labels (§3.2b); the user's worktree ran four containers on 32768–32772 that nothing else could see.
 - **G16** (Milestone 3, live test) `events.subscribe` streams take over their connection (`stream_subscriptions` in herdr's server), so the per-pane `pane.output_matched` fan-out is a second, independent event connection, resubscribed with the current pane list whenever it changes (piggybacked on the existing scan cycle, not a new topology-event path). Advertised URLs live in an in-memory `(workspace, port) → url` registry, ranked by scheme + hostname (https/custom beats http/loopback); a service adopts one only once the listener scan confirms a process on that port, and the registry entry is dropped — not just the service's `Source` — the instant that port's PID changes, so a stale URL from before a restart can never resurface. The regex's optional path capture excludes `)`, `]`, `>`, `,`: log lines commonly wrap the URL (`Serving HTTP on 127.0.0.1 port 52725 (http://127.0.0.1:52725/) ...`) and a greedy path swallowed the closing paren in the first live test.
 - **G17** (Milestone 4, live test) `add`/`remove` go through the control socket like `kill`/`rescan` — they mutate `Daemon`'s in-memory `State` directly and trigger a scan, rather than writing `state.json` from the short-lived CLI process, which would race the daemon's own next write. Re-adding an existing label moves it; a manual label attached to an already-detected `(workspace, port)` stays on that service (source unchanged) so it still disappears with the process, while a label with no backing listener creates a standalone `Source::Manual` row that persists until `remove` deletes it outright. `list` reads `state.json` directly (like the picker) rather than round-tripping through the daemon.
+- **G18** (integration test, live) `herdr --session <name> server` (headless, no PTY, per `herdr server --help`) is the right recipe for scripted tests — much simpler than the PTY-driven disposable session used for manual live checks all through Milestones 1–4. Found the control-socket collision documented in §5: it is keyed only by the herdr session's socket path, not by `HERDR_PLUGIN_STATE_DIR`, so a machine with this plugin linked auto-starts a real daemon for any new session before a test's own `ensure-daemon` runs.
 
 Status: Milestones 1–4 complete and verified live (2026-09-16); GitHub topic
 `herdr-plugin` set and a release workflow builds/publishes binaries on tag
@@ -450,13 +451,31 @@ confirm_kill = true
   (pane ancestry beats cwd beats command line; deepest path wins); merge rules
   (manual label wins; two-scan disappearance grace; advertised URL invalidated
   when PID changes); URL ranking; glance token formatting; config parsing.
-- Integration (needs a herdr binary): start a disposable named herdr session,
-  create a workspace, run `python3 -m http.server 0` in a pane, assert the
-  daemon attributes the port to that workspace via pane ancestry, that the
-  advertised URL printed by `http.server` is captured, and that the picker
-  renders the row; kill via the picker and assert the row disappears after two
-  scans. Reuse herdr's `herdr-throwaway-repro` recipe (`--session`, cleared
-  `HERDR_*` env).
+- **Integration** (`tests/integration.rs`, `#[ignore]`d — run explicitly with
+  `cargo test --test integration -- --ignored`; needs `herdr` and `python3`
+  on `PATH`) ✔ 2026-09-16: starts a disposable named **headless** session
+  (`herdr --session <name> server`, no PTY needed — much simpler than
+  driving a real terminal), creates a workspace, runs a real HTTP server in
+  its pane via `herdr pane run`, drives the compiled `herdr-services` binary
+  exactly as the manifest does (`ensure-daemon`, `rescan`), and asserts
+  against `state.json` (same file the picker reads): pane-ancestry
+  attribution, the advertised URL confirmed once the listener scan sees the
+  port, and the row disappearing once the process exits (Ctrl-C in the
+  pane) — the same mechanism `kill` relies on downstream of the process
+  exiting. Does not drive the popup picker's TUI itself (no practical
+  headless test path for a crossterm popup); `doctor` remains the manual
+  picker smoke check.
+- **Caveat found running it**: the control-socket path is keyed only by the
+  herdr session's socket path (`herdr.rs::session_key`), not by
+  `HERDR_PLUGIN_STATE_DIR` — so on a machine where this plugin is already
+  `herdr plugin link`ed, herdr's own `[[startup]]` hook auto-launches a
+  *real* daemon (using the real, shared plugin state dir) for the test's
+  throwaway session the instant it starts, before the test's own
+  `ensure-daemon` call runs. That real daemon wins the shared control
+  socket, so the test's isolated `HERDR_PLUGIN_STATE_DIR` never gets a
+  `state.json` written to it. Run `herdr plugin unlink lucidstack.herdr-services`
+  before the test and re-`link` after when developing on a machine that has
+  it linked; a clean CI runner (nothing linked) hits no collision.
 - `doctor` doubles as a manual smoke tool.
 
 ## 6. Milestones
