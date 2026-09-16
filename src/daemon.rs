@@ -48,6 +48,16 @@ pub enum Request {
         #[serde(default)]
         signal: Signal,
     },
+    AddManual {
+        workspace_id: String,
+        label: String,
+        port: u16,
+        #[serde(default)]
+        url: Option<String>,
+    },
+    RemoveManual {
+        label: String,
+    },
     Shutdown,
 }
 
@@ -562,6 +572,38 @@ impl Daemon {
                     error: Some(format!("{err:#}")),
                 },
             },
+            Request::AddManual {
+                workspace_id,
+                label,
+                port,
+                url,
+            } => {
+                let url = url.unwrap_or_else(|| self.config.url_for(port));
+                self.state
+                    .upsert_manual(workspace_id, label, port, url, now_ms());
+                self.scan_once();
+                Reply {
+                    ok: true,
+                    pid: None,
+                    error: None,
+                }
+            }
+            Request::RemoveManual { label } => {
+                if self.state.remove_manual(&label) {
+                    self.scan_once();
+                    Reply {
+                        ok: true,
+                        pid: None,
+                        error: None,
+                    }
+                } else {
+                    Reply {
+                        ok: false,
+                        pid: None,
+                        error: Some(format!("no entry labelled {label:?}")),
+                    }
+                }
+            }
             Request::Shutdown => {
                 self.shutting_down = true;
                 Reply {

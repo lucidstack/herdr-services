@@ -205,6 +205,82 @@ impl State {
         ids
     }
 
+    /// Upsert a manual entry by label (SPEC §2.3). A label already on file
+    /// moves to the new `(workspace_id, port, url)`. Otherwise, if a service
+    /// already occupies `(workspace_id, port)` (detected or advertised), the
+    /// label attaches to it — the manual label wins for display, but the row
+    /// keeps disappearing like any other detected service once its listener
+    /// goes away. Only a genuinely new `(workspace_id, port)` creates a
+    /// standalone manual service, which never disappears on its own.
+    pub fn upsert_manual(
+        &mut self,
+        workspace_id: String,
+        label: String,
+        port: u16,
+        url: String,
+        now_ms: u64,
+    ) {
+        self.services.retain_mut(|s| {
+            if s.label.as_deref() == Some(label.as_str()) {
+                if s.source == Source::Manual {
+                    // A standalone manual entry has no reason to exist without its label.
+                    return false;
+                }
+                s.label = None;
+            }
+            true
+        });
+        if let Some(existing) = self
+            .services
+            .iter_mut()
+            .find(|s| s.workspace_id == workspace_id && s.port == port)
+        {
+            existing.label = Some(label);
+            existing.last_seen_ms = now_ms;
+            if existing.source == Source::Manual {
+                existing.url = url;
+            }
+            return;
+        }
+        self.services.push(Service {
+            workspace_id,
+            port,
+            host_hint: "*".into(),
+            pid: None,
+            container: None,
+            process_name: String::new(),
+            argv_summary: String::new(),
+            cwd: None,
+            url,
+            label: Some(label),
+            source: Source::Manual,
+            attribution: Attribution::Manual,
+            first_seen_ms: now_ms,
+            last_seen_ms: now_ms,
+            liveness: Liveness::Unknown,
+            missed_scans: 0,
+        });
+    }
+
+    /// Remove a manual label. A standalone manual service is deleted outright;
+    /// a label attached to a detected/advertised service is just cleared.
+    /// Returns `true` if a label was found and removed.
+    pub fn remove_manual(&mut self, label: &str) -> bool {
+        let Some(index) = self
+            .services
+            .iter()
+            .position(|s| s.label.as_deref() == Some(label))
+        else {
+            return false;
+        };
+        if self.services[index].source == Source::Manual {
+            self.services.remove(index);
+        } else {
+            self.services[index].label = None;
+        }
+        true
+    }
+
     /// TCP connect to each service; sets `liveness`.
     pub fn probe_liveness(&mut self, timeout: Duration) {
         for s in &mut self.services {
@@ -363,6 +439,88 @@ mod tests {
             Some(42),
             "manual entries keep the last known pid"
         );
+    }
+
+    #[test]
+    fn upsert_manual_creates_a_standalone_service_for_an_unseen_port() {
+        let mut state = State::default();
+        state.upsert_manual(
+            "w1".into(),
+            "Storybook".into(),
+            6006,
+            "http://localhost:6006".into(),
+            1,
+        );
+        assert_eq!(state.services.len(), 1);
+        let s = &state.services[0];
+        assert_eq!(
+            (s.source, s.label.as_deref()),
+            (Source::Manual, Some("Storybook"))
+        );
+        // Re-adding the same label just moves it.
+        state.upsert_manual(
+            "w1".into(),
+            "Storybook".into(),
+            7007,
+            "http://localhost:7007".into(),
+            2,
+        );
+        assert_eq!(state.services.len(), 1);
+        assert_eq!(state.services[0].port, 7007);
+    }
+
+    #[test]
+    fn upsert_manual_attaches_a_label_to_an_already_detected_service() {
+        let mut state = State::default();
+        state.apply_scan(vec![observed("w1", 3000, 10)], 1);
+        state.upsert_manual(
+            "w1".into(),
+            "API".into(),
+            3000,
+            "http://localhost:3000".into(),
+            2,
+        );
+        assert_eq!(state.services.len(), 1, "merges into the existing row");
+        assert_eq!(
+            state.services[0].source,
+            Source::Detected,
+            "stays detected, not manual"
+        );
+        assert_eq!(state.services[0].label.as_deref(), Some("API"));
+        // The process disappears like any other detected service, label included.
+        state.apply_scan(vec![], 3);
+        state.apply_scan(vec![], 4);
+        assert!(state.services.is_empty());
+    }
+
+    #[test]
+    fn remove_manual_deletes_a_standalone_entry_but_only_unlabels_a_detected_one() {
+        let mut state = State::default();
+        state.apply_scan(vec![observed("w1", 3000, 10)], 1);
+        state.upsert_manual(
+            "w1".into(),
+            "API".into(),
+            3000,
+            "http://localhost:3000".into(),
+            2,
+        );
+        state.upsert_manual(
+            "w1".into(),
+            "Storybook".into(),
+            6006,
+            "http://localhost:6006".into(),
+            2,
+        );
+        assert!(state.remove_manual("Storybook"));
+        assert_eq!(state.services.len(), 1, "standalone entry is gone");
+        assert!(state.remove_manual("API"));
+        assert_eq!(
+            state.services.len(),
+            1,
+            "detected service stays, just unlabelled"
+        );
+        assert_eq!(state.services[0].label, None);
+        assert!(!state.remove_manual("API"), "already removed");
     }
 
     #[test]

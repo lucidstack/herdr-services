@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod doctor;
 mod herdr;
+mod manual;
 mod names;
 mod picker;
 mod process;
@@ -29,6 +30,11 @@ usage: herdr-services <command> [flags]
   open-picker               ensure the daemon, then open the picker popup
   configure [--remove|--print|--no-reload]
                             install the managed [ui.sidebar.spaces] block
+  add <label> <:PORT|URL> [--workspace <id>]
+                            register a service the scanner cannot see
+  remove --label <label>   drop a manually registered service
+  list [--workspace <id>] [--json]
+                            list known services
   doctor                    check environment, herdr, scanner and attribution
   --version";
 
@@ -41,6 +47,9 @@ fn main() -> Result<()> {
         Some("rescan") => rescan(),
         Some("open-picker") => open_picker(flag("--verbose")),
         Some("configure") => configure(flag("--remove"), flag("--print"), !flag("--no-reload")),
+        Some("add") => add(&args[1..]),
+        Some("remove") => remove(&args[1..]),
+        Some("list") => list(&args[1..]),
         Some("doctor") => doctor::run(),
         Some("picker") => picker::run(),
         Some("--version") => {
@@ -85,6 +94,110 @@ fn rescan() -> Result<()> {
         bail!("rescan failed: {}", reply.error.unwrap_or_default());
     }
     println!("rescanned");
+    Ok(())
+}
+
+/// `--name value` anywhere in `args`; the value is consumed so it is never
+/// mistaken for a positional argument.
+fn value_flag(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+fn add(args: &[String]) -> Result<()> {
+    let workspace = value_flag(args, "--workspace");
+    let positional: Vec<&String> = {
+        let mut skip_next = false;
+        args.iter()
+            .filter(|a| {
+                if skip_next {
+                    skip_next = false;
+                    return false;
+                }
+                if a.as_str() == "--workspace" {
+                    skip_next = true;
+                    return false;
+                }
+                true
+            })
+            .collect()
+    };
+    if positional.len() != 2 {
+        bail!("usage: herdr-services add <label> <:PORT|URL> [--workspace <id>]");
+    }
+    let label = positional[0].clone();
+    let target = positional[1];
+    let (port, url) = manual::parse_target(target)?;
+    let workspace_id = match workspace {
+        Some(id) => id,
+        None => std::env::var("HERDR_WORKSPACE_ID")
+            .context("no --workspace given and HERDR_WORKSPACE_ID is not set")?,
+    };
+    let (_, dirs) = session()?;
+    daemon::ensure_daemon(&dirs, false)?;
+    let reply = daemon::control(
+        &dirs.control_socket(),
+        &daemon::Request::AddManual {
+            workspace_id,
+            label: label.clone(),
+            port,
+            url,
+        },
+        Duration::from_secs(10),
+    )?;
+    if !reply.ok {
+        bail!("add failed: {}", reply.error.unwrap_or_default());
+    }
+    println!("added {label} on port {port}");
+    Ok(())
+}
+
+fn remove(args: &[String]) -> Result<()> {
+    let label = value_flag(args, "--label")
+        .ok_or_else(|| anyhow::anyhow!("usage: herdr-services remove --label <label>"))?;
+    let (_, dirs) = session()?;
+    daemon::ensure_daemon(&dirs, false)?;
+    let reply = daemon::control(
+        &dirs.control_socket(),
+        &daemon::Request::RemoveManual {
+            label: label.clone(),
+        },
+        Duration::from_secs(10),
+    )?;
+    if !reply.ok {
+        bail!("remove failed: {}", reply.error.unwrap_or_default());
+    }
+    println!("removed {label}");
+    Ok(())
+}
+
+fn list(args: &[String]) -> Result<()> {
+    let workspace = value_flag(args, "--workspace");
+    let json = args.iter().any(|a| a == "--json");
+    let (_, dirs) = session()?;
+    daemon::ensure_daemon(&dirs, false)?;
+    let state = state::State::read(&dirs.state_file())?;
+    let services: Vec<&state::Service> = match &workspace {
+        Some(ws) => state.services_for(ws).collect(),
+        None => state.services.iter().collect(),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&services)?);
+        return Ok(());
+    }
+    if services.is_empty() {
+        println!("no services");
+        return Ok(());
+    }
+    for s in services {
+        let name = s.label.as_deref().unwrap_or(&s.process_name);
+        println!(
+            "{:<10} {:<6} {:<20} {}",
+            s.workspace_id, s.port, name, s.url
+        );
+    }
     Ok(())
 }
 
