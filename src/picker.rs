@@ -510,11 +510,17 @@ impl Picker {
             .iter()
             .position(|l| matches!(l, Line::Row(i) if *i == self.selected))
             .unwrap_or(0);
-        if selected_line < self.scroll {
-            self.scroll = selected_line;
+        // A group header directly above the selection travels with it.
+        let top_line = match selected_line.checked_sub(1) {
+            Some(prev) if matches!(self.lines.get(prev), Some(Line::Header(_))) => prev,
+            _ => selected_line,
+        };
+        if top_line < self.scroll {
+            self.scroll = top_line;
         } else if selected_line >= self.scroll + body_height {
             self.scroll = selected_line + 1 - body_height;
         }
+        self.scroll = self.scroll.min(self.lines.len().saturating_sub(1));
         let name_w = self
             .rows
             .iter()
