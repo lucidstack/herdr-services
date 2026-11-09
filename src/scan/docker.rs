@@ -124,10 +124,12 @@ pub fn parse_ports(text: &str) -> Vec<PublishedPort> {
         let Some((host_addr, host_port)) = host.rsplit_once(':') else {
             continue;
         };
-        let (Ok(host_port), Ok(container_port)) = (host_port.parse(), target.parse()) else {
+        let (Some((host_start, host_end)), Some((target_start, target_end))) =
+            (parse_port_range(host_port), parse_port_range(target))
+        else {
             continue;
         };
-        if out.iter().any(|p| p.host_port == host_port) {
+        if host_end - host_start != target_end - target_start {
             continue;
         }
         let host_addr = if host_addr == "0.0.0.0" || host_addr == "[::]" {
@@ -135,13 +137,25 @@ pub fn parse_ports(text: &str) -> Vec<PublishedPort> {
         } else {
             host_addr.to_string()
         };
-        out.push(PublishedPort {
-            host_addr,
-            host_port,
-            container_port,
-        });
+        for (host_port, container_port) in (host_start..=host_end).zip(target_start..=target_end) {
+            if out.iter().any(|p| p.host_port == host_port) {
+                continue;
+            }
+            out.push(PublishedPort {
+                host_addr: host_addr.clone(),
+                host_port,
+                container_port,
+            });
+        }
     }
     out
+}
+
+fn parse_port_range(text: &str) -> Option<(u16, u16)> {
+    let (start, end) = text.split_once('-').unwrap_or((text, text));
+    let start = start.parse().ok()?;
+    let end = end.parse().ok()?;
+    (start > 0 && start <= end).then_some((start, end))
 }
 
 #[cfg(test)]
@@ -206,5 +220,45 @@ mod tests {
     #[test]
     fn garbage_lines_are_skipped() {
         assert!(parse_ps("not json\n\n").is_empty());
+    }
+
+    #[test]
+    fn expands_docker_port_ranges_and_collapses_dual_stack_bindings() {
+        let ports = parse_ports("0.0.0.0:8080-8083->8080-8083/tcp, [::]:8080-8083->8080-8083/tcp");
+        assert_eq!(ports.len(), 4);
+        for (port, expected) in ports.iter().zip(8080..=8083) {
+            assert_eq!(port.host_addr, "*");
+            assert_eq!((port.host_port, port.container_port), (expected, expected));
+        }
+        let containers = parse_ps(
+            r#"{"ID":"sbt","Names":"backend-sbt-1","Labels":"com.docker.compose.service=sbt","Ports":"0.0.0.0:8080-8083->8080-8083/tcp, [::]:8080-8083->8080-8083/tcp"}"#,
+        );
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].service, "sbt");
+        assert_eq!(containers[0].ports, ports);
+    }
+
+    #[test]
+    fn handles_remapped_ranges_and_single_ports_together() {
+        let ports = parse_ports("127.0.0.1:18080-18081->8080-8081/tcp, 0.0.0.0:65535->65535/tcp");
+        assert_eq!(ports.len(), 3);
+        assert_eq!((ports[1].host_port, ports[1].container_port), (18081, 8081));
+        assert_eq!(ports[0].host_addr, "127.0.0.1");
+        assert_eq!(ports[2].host_port, 65535);
+    }
+
+    #[test]
+    fn skips_invalid_or_unpublished_port_ranges() {
+        for text in [
+            "0.0.0.0:8083-8080->8080-8083/tcp",
+            "0.0.0.0:8080-8083->8080-8082/tcp",
+            "0.0.0.0:0->8080/tcp",
+            "0.0.0.0:65536->8080/tcp",
+            "0.0.0.0:bad->8080/tcp",
+            "0.0.0.0:8080-8083->8080-8083/udp",
+            "8080-8083/tcp",
+        ] {
+            assert!(parse_ports(text).is_empty(), "{text}");
+        }
     }
 }
